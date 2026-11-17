@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deadline Ledger on QNX 8.0</title>
+<style>
+:root{--bg:#0f1419;--card:#18202a;--ink:#e6edf3;--mute:#8b98a5;--ok:#2ea043;--bad:#f85149;--warn:#d29922;--line:#2b3542}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
+header{padding:18px 24px;border-bottom:1px solid var(--line)}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mute)}
+main{padding:20px 24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.name{font-size:18px;font-weight:600}.spec{color:var(--mute);font-size:12px}
+.badge{font-weight:700;padding:4px 12px;border-radius:999px;font-size:13px;letter-spacing:.5px}
+.KEPT{background:rgba(46,160,67,.18);color:var(--ok)}.MISSING{background:rgba(248,81,73,.22);color:var(--bad)}
+.WAITING,.UNSIGNED{background:rgba(139,152,165,.2);color:var(--mute)}
+.nums{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0}
+.num b{display:block;font-size:20px;font-variant-numeric:tabular-nums}.num span{color:var(--mute);font-size:11px;text-transform:uppercase}
+canvas{width:100%;height:90px;background:#0b1016;border-radius:6px;display:block}
+.legend{color:var(--mute);font-size:11px;margin-top:4px}
+.ctl{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+button{background:#21262d;color:var(--ink);border:1px solid #3a4450;border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer}
+button:hover{border-color:var(--warn)}button.hot{background:#3d1f1f;border-color:var(--bad)}button:disabled{opacity:.5}
+.wide{grid-column:1/-1}
+#log,#sup{font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:220px;overflow:auto;margin:8px 0 0}
+.ev-miss{color:var(--bad)}.ev-rec{color:var(--ok)}.ev-info{color:var(--mute)}
+.kpi{display:flex;gap:32px;flex-wrap:wrap}.kpi div b{font-size:24px;display:block;font-variant-numeric:tabular-nums}.kpi div span{color:var(--mute);font-size:12px}
+</style></head><body>
+<header><h1>Deadline Ledger on QNX 8.0</h1>
+<div class="sub">Timing contracts as files. This page is served by <code>dlweb</code> on the QNX target and reads <code>/dev/deadline/status</code>, the same file <code>cat</code> reads.</div></header>
+<main>
+<section class="card wide"><div class="kpi">
+<div><b id="k-ticks">0</b><span>cycles kept, all contracts</span></div>
+<div><b id="k-miss">0</b><span>missed cycles, all contracts</span></div>
+<div><b id="k-wakes">0</b><span>watcher wake-ups (state changes only)</span></div>
+<div><b id="k-push">0</b><span>events pushed to this page via ionotify()</span></div>
+<div style="margin-left:auto"><button id="reset">reset ledger</button></div></div></section>
+<div id="cards" style="display:contents"></div>
+<section class="card"><div class="head"><div class="name">Kernel-pushed events</div><span class="spec">GET /events &middot; no polling, woken by deadlined</span></div><pre id="log"></pre></section>
+<section class="card"><div class="head"><div class="name">Supervisor</div><span class="spec">asleep until a contract changes state</span></div><pre id="sup"></pre></section>
+</main>
+<script>
+const W=300,hist={},cards={},last={},prev={};let pushes=0;
+function parse(t){const out=[];for(const line of t.split('\n')){if(!line||line[0]=='#'||line.startsWith('t='))continue;
+ const f=line.trim().split(/\s+/),o={name:f[0]};for(const kv of f.slice(1)){const i=kv.indexOf('=');if(i>0)o[kv.slice(0,i)]=kv.slice(i+1)}out.push(o)}return out}
+function card(c){const el=document.createElement('section');el.className='card';const cpu=c.name=='pump'?1:0;
+ el.innerHTML=`<div class="head"><div><div class="name">${c.name}</div><div class="spec">period ${c.period} &middot; budget ${c.budget} &middot; CPU ${cpu}</div></div><span class="badge"></span></div>
+ <div class="nums"><div class="num"><b data-k="ticks"></b><span>cycles kept</span></div><div class="num"><b data-k="misses"></b><span>missed cycles</span></div>
+ <div class="num"><b data-k="episodes"></b><span>miss episodes</span></div><div class="num"><b data-k="worst_gap"></b><span>worst gap</span></div></div>
+ <canvas width="600" height="90"></canvas><div class="legend">last 30 s &middot; red bars = cycles missed per 100 ms &middot; red band = contract broken</div>
+ <div class="ctl"><button class="hot" data-ms="20">steal CPU ${cpu}: 20 ms &times; 5 at priority 50</button><button data-ms="5">5 ms &times; 5</button></div>`;
+ el.querySelectorAll('button').forEach(b=>b.onclick=()=>load(cpu,+b.dataset.ms,b));
+ document.getElementById('cards').appendChild(el);hist[c.name]=[];return el}
+async function load(cpu,ms,b){b.disabled=true;try{const j=await (await fetch(`/load?cpu=${cpu}&ms=${ms}&n=5`,{method:'POST'})).json();
+ logline(`load: hog at priority 50, ${ms} ms bursts x5 on CPU ${cpu} (pid ${j.pid})`,'ev-info')}catch(e){}setTimeout(()=>b.disabled=false,2500)}
+function draw(n){const cv=cards[n].querySelector('canvas'),g=cv.getContext('2d'),h=hist[n],bw=cv.width/W;g.clearRect(0,0,cv.width,cv.height);
+ h.forEach((p,i)=>{const x=(W-h.length+i)*bw;g.fillStyle=p.st=='MISSING'?'rgba(248,81,73,.28)':'rgba(46,160,67,.10)';g.fillRect(x,0,bw+.5,cv.height);
+  if(p.d>0){const y=Math.min(cv.height,10+p.d*8);g.fillStyle='#f85149';g.fillRect(x,cv.height-y,Math.max(bw,2.5),y)}})}
+async function poll(){try{const t=await (await fetch('/status',{cache:'no-store'})).text();let wakes=0,ticks=0,miss=0;
+ for(const c of parse(t)){if(!cards[c.name])cards[c.name]=card(c);const el=cards[c.name],b=el.querySelector('.badge');
+  b.className='badge '+c.state;b.textContent=c.state;
+  for(const k of ['ticks','misses','episodes','worst_gap'])el.querySelector(`[data-k=${k}]`).textContent=k=='ticks'?(+c[k]).toLocaleString():c[k];
+  const m=+c.misses,p=last[c.name],d=p===undefined?0:Math.max(0,m-p);last[c.name]=m;
+  hist[c.name].push({d,st:c.state});if(hist[c.name].length>W)hist[c.name].shift();draw(c.name);
+  wakes+=(+c.episodes)+(+c.recoveries);ticks+=+c.ticks;miss+=m}
+ document.getElementById('k-wakes').textContent=wakes;document.getElementById('k-ticks').textContent=ticks.toLocaleString();
+ document.getElementById('k-miss').textContent=miss}catch(e){}}
+function logline(s,cls){const L=document.getElementById('log'),d=new Date();
+ L.insertAdjacentHTML('afterbegin',`<span class="${cls}">${d.toTimeString().slice(0,8)}.${String(d.getMilliseconds()).padStart(3,'0')}  ${s}</span>\n`)}
+const es=new EventSource('/events');
+es.addEventListener('change',e=>{pushes++;document.getElementById('k-push').textContent=pushes;
+ for(const c of parse(e.data)){const p=prev[c.name];
+  if(p&&p!=c.state){if(c.state=='MISSING')logline(`${c.name} MISSED its deadline (episode ${c.episodes})`,'ev-miss');
+   else if(c.state=='KEPT')logline(`${c.name} recovered after ${c.last_episode} missed cycles`,'ev-rec')}
+  prev[c.name]=c.state}});
+async function sup(){try{const r=await fetch('/log',{cache:'no-store'});if(!r.ok)return;const t=await r.text(),s=document.getElementById('sup');
+ s.textContent=t.trim().split('\n').slice(-14).join('\n');s.scrollTop=s.scrollHeight}catch(e){}}
+document.getElementById('reset').onclick=async()=>{await fetch('/reset',{method:'POST'});for(const k in hist)hist[k].length=0;for(const k in last)delete last[k];logline('ledger reset (wrote "reset" to every contract file)','ev-info')};
+setInterval(poll,100);setInterval(sup,500);poll();sup();
+</script></body></html>
